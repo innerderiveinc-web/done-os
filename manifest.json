@@ -1,0 +1,29 @@
+{
+  "name": "DONE — Request-to-Completion OS",
+  "short_name": "DONE",
+  "description": "Stop chasing people for documents, payments, approvals and confirmations. Send one structured request, track it end-to-end, and get it DONE.",
+  "start_url": "/dashboard",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/src/assets/icon-192.svg",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/src/assets/icon-512.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["business", "productivity", "utilities"],
+  "developer": {
+    "name": "Qsura India Pvt Ltd",
+    "url": "https://qsura.com"
+  }
+}

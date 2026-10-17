@@ -1,0 +1,17 @@
+{
+  "name": "done-request-os",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "DONE — Universal Request-to-Completion OS",
+  "author": "Qsura India Pvt Ltd",
+  "scripts": {
+    "dev": "python3 server.py",
+    "start": "python3 server.py",
+    "build": "python3 build.py || node build.mjs",
+    "preview": "python3 server.py"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.49.1"
+  }
+}
