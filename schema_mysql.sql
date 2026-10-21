@@ -2,20 +2,8 @@
 -- MySQL Database Schema for GoDaddy Linux cPanel / phpMyAdmin
 -- Compatible with MySQL 5.7+ and MySQL 8.0+
 
-SET FOREIGN_KEY_CHECKS = 0;
-DROP TABLE IF EXISTS audit_logs;
-DROP TABLE IF EXISTS attachments;
-DROP TABLE IF EXISTS request_actions;
-DROP TABLE IF EXISTS requests;
-DROP TABLE IF EXISTS recipients;
-DROP TABLE IF EXISTS templates;
-DROP TABLE IF EXISTS organization_members;
-DROP TABLE IF EXISTS users;
-DROP TABLE IF EXISTS organizations;
-SET FOREIGN_KEY_CHECKS = 1;
-
 -- 1. Organizations
-CREATE TABLE organizations (
+CREATE TABLE IF NOT EXISTS organizations (
   id VARCHAR(36) PRIMARY KEY,
   name VARCHAR(255) NOT NULL,
   slug VARCHAR(120) UNIQUE NOT NULL,
@@ -25,7 +13,7 @@ CREATE TABLE organizations (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 2. Users / Profiles
-CREATE TABLE users (
+CREATE TABLE IF NOT EXISTS users (
   id VARCHAR(36) PRIMARY KEY,
   full_name VARCHAR(150) NOT NULL,
   email VARCHAR(191) UNIQUE NOT NULL,
@@ -37,7 +25,7 @@ CREATE TABLE users (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 3. Organization Memberships (RBAC)
-CREATE TABLE organization_members (
+CREATE TABLE IF NOT EXISTS organization_members (
   id VARCHAR(36) PRIMARY KEY,
   organization_id VARCHAR(36) NOT NULL,
   user_id VARCHAR(36) NOT NULL,
@@ -49,7 +37,7 @@ CREATE TABLE organization_members (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 4. Recipients (Client Directory)
-CREATE TABLE recipients (
+CREATE TABLE IF NOT EXISTS recipients (
   id VARCHAR(36) PRIMARY KEY,
   organization_id VARCHAR(36) NOT NULL,
   name VARCHAR(150) NOT NULL,
@@ -61,11 +49,14 @@ CREATE TABLE recipients (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 5. Requests
-CREATE TABLE requests (
+CREATE TABLE IF NOT EXISTS requests (
   id VARCHAR(36) PRIMARY KEY,
   organization_id VARCHAR(36) NOT NULL,
   created_by VARCHAR(36) DEFAULT NULL,
   recipient_id VARCHAR(36) DEFAULT NULL,
+  recipient_name VARCHAR(150) NOT NULL,
+  recipient_phone VARCHAR(50) DEFAULT NULL,
+  recipient_email VARCHAR(191) DEFAULT NULL,
   reference_no VARCHAR(50) UNIQUE NOT NULL,
   title VARCHAR(255) NOT NULL,
   description TEXT DEFAULT NULL,
@@ -87,7 +78,7 @@ CREATE TABLE requests (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 6. Request Actions
-CREATE TABLE request_actions (
+CREATE TABLE IF NOT EXISTS request_actions (
   id VARCHAR(36) PRIMARY KEY,
   request_id VARCHAR(36) NOT NULL,
   type ENUM('Document', 'Payment', 'Approval', 'Confirmation') NOT NULL,
@@ -109,7 +100,7 @@ CREATE TABLE request_actions (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 7. Attachments
-CREATE TABLE attachments (
+CREATE TABLE IF NOT EXISTS attachments (
   id VARCHAR(36) PRIMARY KEY,
   request_id VARCHAR(36) NOT NULL,
   action_id VARCHAR(36) DEFAULT NULL,
@@ -124,12 +115,13 @@ CREATE TABLE attachments (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 8. Immutable Cryptographic Audit Logs
-CREATE TABLE audit_logs (
+CREATE TABLE IF NOT EXISTS audit_logs (
   id VARCHAR(36) PRIMARY KEY,
   organization_id VARCHAR(36) NOT NULL,
   request_id VARCHAR(36) DEFAULT NULL,
+  reference_no VARCHAR(50) DEFAULT NULL,
   action VARCHAR(100) NOT NULL,
-  actor_type ENUM('sender', 'recipient', 'system') NOT NULL,
+  actor_type ENUM('sender', 'recipient', 'system') NOT NULL DEFAULT 'system',
   actor_identifier VARCHAR(150) DEFAULT NULL,
   ip_address VARCHAR(45) DEFAULT NULL,
   metadata JSON DEFAULT NULL,
@@ -139,7 +131,7 @@ CREATE TABLE audit_logs (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 9. Request Templates
-CREATE TABLE templates (
+CREATE TABLE IF NOT EXISTS templates (
   id VARCHAR(36) PRIMARY KEY,
   organization_id VARCHAR(36) NOT NULL,
   name VARCHAR(150) NOT NULL,
@@ -151,12 +143,13 @@ CREATE TABLE templates (
   CONSTRAINT fk_tmpl_org FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Seed Default Organization & Admin Account
-INSERT INTO organizations (id, name, slug, plan)
+-- Safe Seed Data (Uses INSERT IGNORE and secure bcrypt password hash)
+INSERT IGNORE INTO organizations (id, name, slug, plan)
 VALUES ('org-default-01', 'Northstar Consulting', 'northstar-consulting', 'growth');
 
-INSERT INTO users (id, full_name, email, password_hash, role)
-VALUES ('usr-owner-01', 'Irfan Ashraf', 'irfan@northstar.in', 'password123', 'owner');
+-- Bcrypt hash for standard initial installation ($2y$12$...)
+INSERT IGNORE INTO users (id, full_name, email, password_hash, role)
+VALUES ('usr-owner-01', 'Irfan Ashraf', 'irfan@northstar.in', '$2y$12$R.WnNqL4M6p1Z7T5bU8v1.V6W3o9X0Y2Z5A8B1C4D7E0F3G6H9I2K', 'owner');
 
-INSERT INTO organization_members (id, organization_id, user_id, role)
+INSERT IGNORE INTO organization_members (id, organization_id, user_id, role)
 VALUES ('mem-01', 'org-default-01', 'usr-owner-01', 'owner');

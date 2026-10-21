@@ -33,20 +33,35 @@ export function AuthProvider({ children }) {
 
       return () => subscription.unsubscribe();
     } else {
-      // Demo / Local Sandbox Auth: check if user has explicitly logged in or registered
+      // Production Security Gate: Never allow mock client-side auth in production
+      if (config.isProduction) {
+        console.error('[DONE Security] Supabase backend missing in production. Client-side demo auth is strictly disabled.');
+        localStorage.removeItem('done_demo_user');
+        setUser(null);
+        setSession(null);
+        setLoading(false);
+        return;
+      }
+
+      // Demo / Local Sandbox Auth: check if user has explicitly logged in with valid demo session
       const cached = localStorage.getItem('done_demo_user');
       if (cached) {
         try {
           const userObj = JSON.parse(cached);
-          setUser(userObj);
-          setSession({ access_token: 'demo-session-token', user: userObj });
+          if (userObj && userObj.is_demo) {
+            setUser(userObj);
+            setSession({ access_token: 'demo-sandbox-token', user: userObj, is_demo: true });
+          } else {
+            localStorage.removeItem('done_demo_user');
+            setUser(null);
+            setSession(null);
+          }
         } catch (e) {
           localStorage.removeItem('done_demo_user');
           setUser(null);
           setSession(null);
         }
       } else {
-        // Start unauthenticated so new visitors see registration & onboarding
         setUser(null);
         setSession(null);
       }
@@ -67,11 +82,27 @@ export function AuthProvider({ children }) {
         return { error: err };
       }
     } else {
-      // Local demo fallback
-      const cleanEmail = email || 'irfan@northstar.in';
+      // Production Guard: Reject demo signin in production
+      if (config.isProduction) {
+        return {
+          error: new Error('Production deployment requires an active Supabase / backend authentication service. Demo login is disabled.')
+        };
+      }
+
+      if (!password || password.trim().length === 0) {
+        return { error: new Error('Password is required.') };
+      }
+
+      // Validate known demo credentials
+      const cleanEmail = (email || '').trim().toLowerCase();
+      if (cleanEmail === 'irfan@northstar.in' && password !== 'password123') {
+        return { error: new Error('Invalid credentials. For demo access, use password: password123') };
+      }
+
       const demoUser = {
-        id: 'usr-owner-01',
-        email: cleanEmail,
+        id: 'usr-demo-01',
+        email: cleanEmail || 'demo@done.os',
+        is_demo: true,
         user_metadata: {
           full_name: cleanEmail.includes('@') ? cleanEmail.split('@')[0] : 'Irfan Ashraf',
           organization: 'Northstar Consulting',
@@ -80,13 +111,23 @@ export function AuthProvider({ children }) {
       };
       localStorage.setItem('done_demo_user', JSON.stringify(demoUser));
       setUser(demoUser);
-      const sess = { access_token: 'demo-session-token', user: demoUser };
+      const sess = { access_token: 'demo-sandbox-token', user: demoUser, is_demo: true };
       setSession(sess);
       return { data: { session: sess, user: demoUser }, error: null };
     }
   };
 
   const signUp = async (email, password, metadataOrFullName, maybeOrgName) => {
+    if (config.isProduction && !getSupabase()) {
+      return {
+        error: new Error('Production deployment requires an active Supabase backend. Demo registration is disabled.')
+      };
+    }
+
+    if (!password || password.length < 8) {
+      return { error: new Error('Password must be at least 8 characters long.') };
+    }
+
     let fullName = 'Irfan Ashraf';
     let orgName = 'Northstar Consulting';
 
@@ -118,8 +159,9 @@ export function AuthProvider({ children }) {
       }
     } else {
       const demoUser = {
-        id: 'usr-' + Date.now(),
-        email: email || 'irfan@northstar.in',
+        id: 'usr-demo-' + Date.now(),
+        email: email || 'demo@done.os',
+        is_demo: true,
         user_metadata: {
           full_name: fullName,
           organization: orgName,
@@ -128,7 +170,7 @@ export function AuthProvider({ children }) {
       };
       localStorage.setItem('done_demo_user', JSON.stringify(demoUser));
       setUser(demoUser);
-      const sess = { access_token: 'demo-session-token', user: demoUser };
+      const sess = { access_token: 'demo-sandbox-token', user: demoUser, is_demo: true };
       setSession(sess);
       return { data: { session: sess, user: demoUser }, error: null };
     }
@@ -158,6 +200,7 @@ export function AuthProvider({ children }) {
     loading,
     isAuthenticated: Boolean(user),
     isLiveBackend: isLiveBackend(),
+    isDemoSession: Boolean(user?.is_demo),
     signIn,
     signInWithPassword: signIn,
     signInDemo,

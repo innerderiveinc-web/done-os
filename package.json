@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "python3 server.py",
     "start": "python3 server.py",
-    "build": "python3 build.py || node build.mjs",
+    "build": "python3 build.py",
     "preview": "python3 server.py"
   },
   "dependencies": {

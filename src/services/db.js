@@ -2,7 +2,7 @@
 import { createClient } from '@supabase/supabase-js';
 import { SEED_ORGANIZATION, SEED_REQUESTS, SEED_CONTACTS, SEED_TEMPLATES, SEED_VALIDATION_METRICS } from '../data/seed.js';
 import { stateMachine, AUDIT_ACTIONS } from './stateMachine.js';
-import { config, safeUUID } from '../config.js';
+import { config, safeUUID, generateCryptoToken } from '../config.js';
 
 const STORAGE_KEYS = {
   REQUESTS: 'done_v1_requests',
@@ -112,15 +112,31 @@ class DatabaseService {
   }
 
   getRequestByPublicToken(token) {
+    if (!token || typeof token !== 'string') return null;
+    const cleanToken = token.trim();
+    // Enforce minimum token length to prevent enumeration
+    if (cleanToken.length < 8) return null;
+
     const list = this.getRequests();
-    return list.find(r => r.public_token === token || r.id === token || r.reference_no === token);
+    // STRICT SECURITY: Public token endpoint must ONLY match public_token.
+    // Internal IDs or reference numbers must NEVER grant public access!
+    const req = list.find(r => r.public_token === cleanToken);
+    if (!req) return null;
+
+    // Verify token has not been revoked or expired
+    if (req.is_revoked) return null;
+    if (req.token_expires_at && new Date(req.token_expires_at) < new Date()) {
+      return null;
+    }
+    return req;
   }
 
   createRequest(requestData) {
     const list = this.getRequests();
-    const id = 'req-' + Math.floor(1000 + Math.random() * 9000);
-    const refNo = 'REQ-' + Math.floor(1000 + Math.random() * 9000);
-    const token = 'tok_' + encodeURIComponent(Math.random().toString(36).slice(2) + Date.now().toString(36));
+    const id = safeUUID();
+    const refNo = 'REQ-' + (1000 + list.length + 1);
+    // Cryptographically secure 192-bit token
+    const token = generateCryptoToken(24);
 
     const newRequest = {
       id,

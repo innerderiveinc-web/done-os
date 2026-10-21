@@ -9,19 +9,32 @@
 
 header('Content-Type: application/json');
 
-// 1. Database Configuration (cPanel MySQL)
+// 1. Security Gate: Verify Caller Authorization
+$cron_secret = getenv('CRON_SECRET') ?: 'done_cron_secure_token_2026';
+$is_cli = (php_sapi_name() === 'cli');
+$provided_token = $_GET['token'] ?? ($_SERVER['HTTP_X_CRON_TOKEN'] ?? '');
+
+if (!$is_cli && $provided_token !== $cron_secret) {
+    http_response_code(403);
+    echo json_encode([
+        'error' => '403 Forbidden: Unauthorized cron execution. Provide valid ?token= in request or execute via CLI.'
+    ], JSON_PRETTY_PRINT);
+    exit(1);
+}
+
+// 2. Database Configuration (cPanel MySQL)
 $db_host = getenv('DB_HOST') ?: 'localhost';
 $db_name = getenv('DB_NAME') ?: 'done_os';
 $db_user = getenv('DB_USER') ?: 'root';
 $db_pass = getenv('DB_PASS') ?: '';
 
-// 2. Meta WhatsApp Cloud API Configuration
-// When you register on developers.facebook.com for WhatsApp Business API:
+// 3. Meta WhatsApp Cloud API Configuration
 $wa_token = getenv('WHATSAPP_API_TOKEN') ?: '';
 $wa_phone_id = getenv('WHATSAPP_PHONE_ID') ?: '';
 
 $results = [
     'timestamp' => date('Y-m-d H:i:s'),
+    'mode' => $is_cli ? 'CLI_CRON' : 'AUTHENTICATED_WEB',
     'scanned' => 0,
     'reminders_sent' => 0,
     'errors' => []
@@ -33,20 +46,26 @@ try {
         PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
     ]);
 } catch (PDOException $e) {
-    // If running in local demo without MySQL connected
-    $results['status'] = 'DEMO_STANDALONE_MODE';
-    $results['note'] = 'MySQL not configured yet. Configure DB credentials in cPanel environment or .env file.';
+    $results['status'] = 'DATABASE_CONNECTION_ERROR';
+    $results['note'] = 'Could not connect to MySQL. Ensure credentials are set in .env or cPanel environment.';
     echo json_encode($results, JSON_PRETTY_PRINT);
     exit(0);
 }
 
-// 3. Find requests that are pending/overdue and have not been completed
+// 4. Find requests that are pending/overdue, due within 24 hours, AND have NOT received a reminder in the last 24 hours
 $stmt = $pdo->prepare("
-    SELECT id, reference_no, title, recipient_name, recipient_phone, recipient_email, public_token, due_at, status
-    FROM requests 
-    WHERE status IN ('Sent', 'Opened', 'In Progress', 'Overdue')
-    AND due_at IS NOT NULL
-    AND due_at <= DATE_ADD(NOW(), INTERVAL 1 DAY)
+    SELECT r.id, r.organization_id, r.reference_no, r.title, 
+           r.recipient_name, r.recipient_phone, r.recipient_email, 
+           r.public_token, r.due_at, r.status
+    FROM requests r
+    WHERE r.status IN ('Sent', 'Opened', 'In Progress', 'Overdue')
+      AND r.due_at IS NOT NULL
+      AND r.due_at <= DATE_ADD(NOW(), INTERVAL 1 DAY)
+      AND r.id NOT IN (
+          SELECT request_id FROM audit_logs 
+          WHERE action = 'REMINDER_SENT' 
+            AND created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+      )
 ");
 $stmt->execute();
 $pending = $stmt->fetchAll();
@@ -67,7 +86,7 @@ foreach ($pending as $req) {
             'to' => $clean_phone,
             'type' => 'text',
             'text' => [
-                'body' => "⚠️ Reminder: Your request '{$req['title']}' from Northstar Consulting is pending.\n\nPlease complete it securely here:\n👉 {$link}"
+                'body' => "⚠️ Reminder: Your request '{$req['title']}' is pending.\n\nPlease complete it securely here:\n👉 {$link}"
             ]
         ];
 
@@ -85,15 +104,22 @@ foreach ($pending as $req) {
 
         if ($http_code === 200) {
             $results['reminders_sent']++;
-            // Log in audit_logs
-            $audit = $pdo->prepare("INSERT INTO audit_logs (id, request_id, reference_no, action, metadata, created_at) VALUES (UUID(), ?, ?, 'REMINDER_SENT', ?, NOW())");
-            $audit->execute([$req['id'], $req['reference_no'], json_encode(['channel' => 'whatsapp_cloud_api'])]);
+            // Log in audit_logs with exact matching schema columns
+            $audit = $pdo->prepare("
+                INSERT INTO audit_logs (id, organization_id, request_id, reference_no, action, actor_type, metadata, created_at) 
+                VALUES (UUID(), ?, ?, ?, 'REMINDER_SENT', 'system', ?, NOW())
+            ");
+            $audit->execute([
+                $req['organization_id'],
+                $req['id'],
+                $req['reference_no'],
+                json_encode(['channel' => 'whatsapp_cloud_api', 'recipient' => $clean_phone])
+            ]);
         } else {
             $results['errors'][] = "Failed sending to {$clean_phone}: HTTP {$http_code}";
         }
     } else {
-        // Log that reminder was eligible
-        $results['note'] = 'WhatsApp API token not set. To send 100% automated background WhatsApp messages without manual clicks, set WHATSAPP_API_TOKEN and WHATSAPP_PHONE_ID.';
+        $results['note'] = 'WhatsApp API token not set. To send 100% automated background WhatsApp messages, configure WHATSAPP_API_TOKEN.';
     }
 }
 

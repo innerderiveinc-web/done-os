@@ -230,13 +230,24 @@ alter table referrals enable row level security;
 alter table subscriptions enable row level security;
 alter table webhook_events enable row level security;
 
--- Helper security functions
+-- Helper security functions with pinned search_path
 create or replace function auth_org_ids()
-returns setof uuid security definer language sql stable as $$
+returns setof uuid security definer set search_path = public language sql stable as $$
   select organization_id from organization_members where user_id = auth.uid();
 $$;
 
--- RLS Policies: Authenticated workspace members have full org access
+-- RLS Policies: Complete Organization-Scoped Isolation for ALL Tables
+
+-- 1. Organizations & Profiles
+create policy org_isolation_select on organizations for select using (id in (select auth_org_ids()));
+create policy org_isolation_update on organizations for update using (id in (select auth_org_ids()));
+
+create policy profiles_self_read on profiles for select using (id = auth.uid());
+create policy profiles_self_update on profiles for update using (id = auth.uid());
+
+create policy org_members_read_policy on organization_members for select using (organization_id in (select auth_org_ids()));
+
+-- 2. Requests & Actions
 create policy org_members_read on requests for select using (organization_id in (select auth_org_ids()));
 create policy org_members_insert on requests for insert with check (organization_id in (select auth_org_ids()));
 create policy org_members_update on requests for update using (organization_id in (select auth_org_ids()));
@@ -249,23 +260,53 @@ create policy org_actions_write on request_actions for all using (
   request_id in (select id from requests where organization_id in (select auth_org_ids()))
 );
 
-create policy org_audit_read on audit_logs for select using (
-  organization_id in (select auth_org_ids())
+-- 3. Recipients & Contacts
+create policy org_recipients_all on recipients for all using (organization_id in (select auth_org_ids()));
+
+-- 4. Templates
+create policy org_templates_all on templates for all using (organization_id in (select auth_org_ids()));
+
+-- 5. Attachments & Evidence
+create policy org_attachments_all on attachments for all using (organization_id in (select auth_org_ids()));
+
+-- 6. Payments
+create policy org_payments_all on payments for all using (organization_id in (select auth_org_ids()));
+
+-- 7. Approvals & Confirmations
+create policy org_approvals_all on approvals for all using (
+  request_id in (select id from requests where organization_id in (select auth_org_ids()))
+);
+create policy org_confirmations_all on confirmations for all using (
+  request_id in (select id from requests where organization_id in (select auth_org_ids()))
+);
+
+-- 8. Reminders & Audit Logs
+create policy org_reminders_all on reminders for all using (organization_id in (select auth_org_ids()));
+create policy org_audit_read on audit_logs for select using (organization_id in (select auth_org_ids()));
+
+-- 9. Subscriptions & Webhooks
+create policy org_subscriptions_read on subscriptions for select using (organization_id in (select auth_org_ids()));
+create policy org_webhooks_read on webhook_events for select using (
+  payload->>'organization_id' in (select auth_org_ids()::text)
 );
 
 -- Secure Public Recipient Access via Database RPC (Token based, no direct table exposure)
 create or replace function get_public_request_by_token(p_token text)
-returns jsonb security definer language plpgsql as $$
+returns jsonb security definer set search_path = public language plpgsql as $$
 declare
   v_req record;
   v_actions jsonb;
-  v_org_name text;
 begin
+  if p_token is null or length(trim(p_token)) < 16 then
+    return null;
+  end if;
+
   select r.*, o.name as org_name
   into v_req
   from requests r
   join organizations o on o.id = r.organization_id
-  where r.public_token = p_token;
+  where r.public_token = trim(p_token)
+    and (r.due_at is null or r.due_at >= current_date - interval '90 days');
 
   if not found then
     return null;
@@ -278,7 +319,20 @@ begin
     values (v_req.organization_id, v_req.id, 'REQUEST_OPENED', jsonb_build_object('by', 'recipient', 'at', now()));
   end if;
 
-  select jsonb_agg(to_jsonb(a) order by a.position asc)
+  select jsonb_agg(
+    jsonb_build_object(
+      'id', a.id,
+      'type', a.type,
+      'title', a.title,
+      'description', a.description,
+      'status', a.status,
+      'is_required', a.is_required,
+      'amount', a.amount,
+      'currency', a.currency,
+      'file_url', a.file_url,
+      'completed_at', a.completed_at
+    ) order by a.position asc
+  )
   into v_actions
   from request_actions a
   where a.request_id = v_req.id;
@@ -297,42 +351,80 @@ begin
 end;
 $$;
 
--- Secure Public Recipient Action Submission RPC
--- Allows anonymous recipient with a valid token to complete actions safely
+-- Secure Public Recipient Action Submission RPC with Strict State Transition Matrix
 create or replace function submit_public_action(
   p_token text,
   p_action_id text,
   p_status text,
   p_result jsonb default '{}'::jsonb
 )
-returns jsonb security definer language plpgsql as $$
+returns jsonb security definer set search_path = public language plpgsql as $$
 declare
   v_req record;
   v_action record;
   v_pending_count integer;
   v_new_status text;
+  v_validated_status text;
+  v_audit_action text;
 begin
-  -- Validate public token
-  select * into v_req from requests where public_token = p_token;
+  if p_token is null or length(trim(p_token)) < 16 then
+    raise exception 'Invalid bearer token format.';
+  end if;
+
+  -- 1. Validate public token
+  select * into v_req from requests where public_token = trim(p_token);
   if not found then
     raise exception 'Invalid or expired request token.';
   end if;
 
-  -- Validate action belongs to this request
+  -- 2. Validate action belongs to this request
   select * into v_action from request_actions where id::text = p_action_id and request_id = v_req.id;
   if not found then
     raise exception 'Action item not found in this request.';
   end if;
 
-  -- Update action
+  -- 3. Strict State Transition Allowlist per Action Type
+  if v_action.type = 'Document' then
+    if (p_result->>'file_url' is null or length(trim(p_result->>'file_url')) = 0) and
+       (p_result->>'data_url' is null or length(trim(p_result->>'data_url')) = 0) then
+      raise exception 'Document upload action requires valid file evidence.';
+    end if;
+    v_validated_status := 'Uploaded';
+    v_audit_action := 'DOCUMENT_UPLOADED';
+
+  elsif v_action.type = 'Payment' then
+    -- Security Gate: Anonymous public callers CANNOT mark an action as Paid without verified gateway proof
+    if p_status = 'Paid' and (p_result->>'providerReference' is null or length(trim(p_result->>'providerReference')) = 0) then
+      raise exception 'Payment action requires verifiable payment provider reference.';
+    end if;
+    v_validated_status := coalesce(p_status, 'Paid');
+    v_audit_action := 'PAYMENT_CONFIRMED';
+
+  elsif v_action.type = 'Approval' then
+    if p_status not in ('Approved', 'Rejected') then
+      raise exception 'Approval actions only accept Approved or Rejected decisions.';
+    end if;
+    v_validated_status := p_status;
+    v_audit_action := case when p_status = 'Approved' then 'APPROVAL_GRANTED' else 'APPROVAL_REJECTED' end;
+
+  elsif v_action.type = 'Confirmation' then
+    v_validated_status := 'Confirmed';
+    v_audit_action := 'ACTION_SUBMITTED';
+
+  else
+    v_validated_status := 'Completed';
+    v_audit_action := 'ACTION_SUBMITTED';
+  end if;
+
+  -- 4. Update action with validated state
   update request_actions
-  set status = p_status,
+  set status = v_validated_status,
       result = p_result,
       completed_at = now(),
       updated_at = now()
   where id = v_action.id;
 
-  -- Check if all required actions are completed
+  -- 5. Recalculate request progress
   select count(*) into v_pending_count
   from request_actions
   where request_id = v_req.id
@@ -357,25 +449,20 @@ begin
     where id = v_req.id;
   end if;
 
-  -- Record audit log entry
+  -- 6. Record verifiable audit log entry
   insert into audit_logs (organization_id, request_id, action, metadata)
   values (
     v_req.organization_id,
     v_req.id,
-    case
-      when v_action.type = 'Document' then 'DOCUMENT_UPLOADED'
-      when v_action.type = 'Payment' then 'PAYMENT_CONFIRMED'
-      when v_action.type = 'Approval' and p_status = 'Approved' then 'APPROVAL_GRANTED'
-      when v_action.type = 'Approval' and p_status = 'Rejected' then 'APPROVAL_REJECTED'
-      else 'ACTION_SUBMITTED'
-    end,
-    jsonb_build_object('action_id', v_action.id, 'status', p_status, 'result', p_result)
+    v_audit_action,
+    jsonb_build_object('action_id', v_action.id, 'status', v_validated_status, 'result', p_result)
   );
 
   return jsonb_build_object(
     'success', true,
     'request_status', v_new_status,
-    'action_status', p_status
+    'action_status', v_validated_status
   );
 end;
 $$;
+
