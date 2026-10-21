@@ -5,7 +5,7 @@ import { useWorkspace } from '../context/WorkspaceContext.js';
 import { db } from '../services/db.js';
 
 export function Shell({ children, currentPath, navigate, onOpenSearch }) {
-  const { user, signOut } = useAuth();
+  const { user, signOut, isDemoSession } = useAuth();
   const { organization } = useWorkspace();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
@@ -136,6 +136,7 @@ export function Shell({ children, currentPath, navigate, onOpenSearch }) {
               <div className="eyebrow">WORKSPACE</div>
               <div className="workspace-title" onClick=${handleNavClick('/settings')}>
                 ${organization.name || 'Northstar Consulting'}
+                ${isDemoSession ? html`<span className="badge badge-warning" style="font-size: 10px; margin-left: 8px; font-weight: 700; padding: 2px 6px; border-radius: 4px; vertical-align: middle;">SANDBOX</span>` : null}
                 <span className="chev"> ⌄</span>
               </div>
             </div>
